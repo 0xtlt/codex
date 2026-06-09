@@ -215,7 +215,10 @@ impl ModelProvider for ConfiguredModelProvider {
                     | CodexAuth::AgentIdentity(_)
                     | CodexAuth::PersonalAccessToken(_) => {
                         let email = auth.get_account_email();
-                        let plan_type = auth.account_plan_type();
+                        let plan_type = self
+                            .auth_manager
+                            .as_ref()
+                            .and_then(|manager| manager.effective_account_plan_type());
 
                         match (email, plan_type) {
                             (Some(email), Some(plan_type)) => {
