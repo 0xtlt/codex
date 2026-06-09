@@ -208,6 +208,8 @@ pub struct SessionTitlesToml {
     pub enabled: Option<bool>,
     /// Model used for default session title generation.
     pub model: Option<String>,
+    /// Additional user-configured style rules for default session title generation.
+    pub additional_instructions: Option<String>,
 }
 
 /// Effective session title settings after defaults are applied.
@@ -217,6 +219,8 @@ pub struct SessionTitlesConfig {
     pub enabled: bool,
     /// Optional model override for the title-only background request.
     pub model: Option<String>,
+    /// Additional user-configured style rules for generated titles.
+    pub additional_instructions: Option<String>,
 }
 
 impl Default for SessionTitlesConfig {
@@ -224,6 +228,7 @@ impl Default for SessionTitlesConfig {
         Self {
             enabled: true,
             model: None,
+            additional_instructions: None,
         }
     }
 }
@@ -234,6 +239,7 @@ impl From<SessionTitlesToml> for SessionTitlesConfig {
         Self {
             enabled: toml.enabled.unwrap_or(defaults.enabled),
             model: toml.model,
+            additional_instructions: toml.additional_instructions,
         }
     }
 }

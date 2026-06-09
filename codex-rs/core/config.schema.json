@@ -1644,6 +1644,10 @@
       "additionalProperties": false,
       "description": "Session title settings loaded from config.toml.",
       "properties": {
+        "additional_instructions": {
+          "description": "Additional user-configured style rules for default session title generation.",
+          "type": "string"
+        },
         "enabled": {
           "description": "When `false`, skip generating a default `/rename` title for new interactive sessions.",
           "type": "boolean"

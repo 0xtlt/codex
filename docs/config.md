@@ -90,6 +90,19 @@ Select the auxiliary model used for generated titles with:
 model = "gpt-5.4-mini"
 ```
 
+Add style rules for generated titles with:
+
+```toml
+[session_titles]
+additional_instructions = """
+- Prefer French titles.
+- Keep client names unchanged.
+- Prefix Shopify-related titles with "Shopify:".
+"""
+```
+
+Additional instructions may refine wording and style, but they do not replace the built-in title prompt or its JSON output contract.
+
 ## Plan mode defaults
 
 `plan_mode_reasoning_effort` lets you set a Plan-mode-specific default reasoning

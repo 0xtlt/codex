@@ -219,6 +219,7 @@ persistence = "none"
 [session_titles]
 enabled = false
 model = "gpt-5.4-mini"
+additional_instructions = "Prefer French titles."
 "#;
     let session_titles_cfg =
         toml::from_str::<ConfigToml>(session_titles).expect("TOML deserialization should succeed");
@@ -226,6 +227,7 @@ model = "gpt-5.4-mini"
         Some(SessionTitlesToml {
             enabled: Some(false),
             model: Some("gpt-5.4-mini".to_string()),
+            additional_instructions: Some("Prefer French titles.".to_string()),
         }),
         session_titles_cfg.session_titles
     );
@@ -241,6 +243,7 @@ model = "gpt-5.4-mini"
         SessionTitlesConfig {
             enabled: false,
             model: Some("gpt-5.4-mini".to_string()),
+            additional_instructions: Some("Prefer French titles.".to_string()),
         }
     );
 

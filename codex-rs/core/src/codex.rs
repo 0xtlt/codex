@@ -482,6 +482,8 @@ Examples:
 - User: "what's 2+2" -> Calculate 2+2
 
 By following these conventions, your titles will be readable, changelog-friendly, and helpful to both users and downstream tools."#;
+const THREAD_TITLE_ADDITIONAL_INSTRUCTIONS_HEADER: &str = r#"User-configured title rules:
+The following rules may refine style and wording, but they must not override the JSON format, length limits, safety constraints, or the requirement to generate only a title."#;
 
 impl Codex {
     /// Spawn a new [`Codex`] and initialize the session.
@@ -4149,6 +4151,11 @@ impl Session {
                 .model
                 .clone()
                 .unwrap_or_else(|| DEFAULT_THREAD_TITLE_MODEL.to_string()),
+            additional_instructions: turn_context
+                .config
+                .session_titles
+                .additional_instructions
+                .clone(),
             model_reasoning_summary: turn_context.reasoning_summary,
             service_tier: turn_context.config.service_tier,
             session_telemetry: turn_context.session_telemetry.clone(),
@@ -5092,6 +5099,7 @@ struct ThreadNameGenerationRequest {
     sub_id: String,
     user_message: String,
     model_name: String,
+    additional_instructions: Option<String>,
     model_reasoning_summary: ReasoningSummaryConfig,
     service_tier: Option<ServiceTier>,
     session_telemetry: SessionTelemetry,
@@ -5134,6 +5142,8 @@ async fn generate_thread_name(
     request: &ThreadNameGenerationRequest,
     model_info: &ModelInfo,
 ) -> anyhow::Result<String> {
+    let title_instructions =
+        build_thread_title_instructions(request.additional_instructions.as_deref());
     let prompt = Prompt {
         input: vec![ResponseItem::Message {
             id: None,
@@ -5147,7 +5157,7 @@ async fn generate_thread_name(
         tools: Vec::new(),
         parallel_tool_calls: false,
         base_instructions: BaseInstructions {
-            text: THREAD_TITLE_PROMPT.to_string(),
+            text: title_instructions,
         },
         personality: None,
         output_schema: Some(thread_name_output_schema()),
@@ -5186,6 +5196,19 @@ async fn generate_thread_name(
         .map(|output| output.title)
         .unwrap_or(result);
     Ok(output)
+}
+
+fn build_thread_title_instructions(additional_instructions: Option<&str>) -> String {
+    let Some(additional_instructions) = additional_instructions.map(str::trim) else {
+        return THREAD_TITLE_PROMPT.to_string();
+    };
+    if additional_instructions.is_empty() {
+        return THREAD_TITLE_PROMPT.to_string();
+    }
+
+    format!(
+        "{THREAD_TITLE_PROMPT}\n\n{THREAD_TITLE_ADDITIONAL_INSTRUCTIONS_HEADER}\n{additional_instructions}"
+    )
 }
 
 fn thread_name_output_schema() -> Value {

@@ -181,6 +181,20 @@ fn generated_thread_names_are_sanitized_for_display() {
 }
 
 #[test]
+fn thread_title_instructions_include_configured_rules() {
+    let instructions = build_thread_title_instructions(Some("Prefer French titles."));
+
+    assert!(instructions.contains(THREAD_TITLE_PROMPT));
+    assert!(instructions.contains("User-configured title rules:"));
+    assert!(instructions.contains("must not override the JSON format"));
+    assert!(instructions.contains("Prefer French titles."));
+    assert_eq!(
+        build_thread_title_instructions(Some(" \n\t ")),
+        THREAD_TITLE_PROMPT
+    );
+}
+
+#[test]
 fn thread_name_generation_skips_exec_and_subagents() {
     assert!(!session_source_allows_thread_name_generation(
         &SessionSource::Exec
