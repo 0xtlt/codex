@@ -47,6 +47,7 @@ use codex_config::types::ModelAvailabilityNuxConfig;
 use codex_config::types::Notice;
 use codex_config::types::OAuthCredentialsStoreMode;
 use codex_config::types::SessionPickerViewMode;
+use codex_config::types::SessionTitleConfig;
 use codex_config::types::ToolSuggestConfig;
 use codex_config::types::ToolSuggestDisabledTool;
 use codex_config::types::ToolSuggestDiscoverable;
@@ -840,6 +841,8 @@ pub struct Config {
 
     /// Memories subsystem settings.
     pub memories: MemoriesConfig,
+    /// Settings for default generated thread names.
+    pub session_title: SessionTitleConfig,
 
     /// Directory containing all Codex state (defaults to `~/.codex` but can be
     /// overridden by the `CODEX_HOME` environment variable).
@@ -2782,6 +2785,8 @@ impl Config {
             None => WindowsSandboxLevel::Disabled,
         };
         let memories_config: MemoriesConfig = cfg.memories.clone().unwrap_or_default().into();
+        let session_title_config: SessionTitleConfig =
+            cfg.session_title.clone().unwrap_or_default().into();
         let memories_root = memory_root(&codex_home);
 
         let profiles_are_active = effective_permission_selection.profiles_are_active(
@@ -3503,6 +3508,7 @@ impl Config {
             agent_max_depth,
             agent_roles,
             memories: memories_config,
+            session_title: session_title_config,
             agent_job_max_runtime_seconds,
             agent_interrupt_message_enabled,
             codex_home,

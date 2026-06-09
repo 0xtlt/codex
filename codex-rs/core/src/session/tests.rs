@@ -170,6 +170,7 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration as StdDuration;
 
 mod guardian_tests;
@@ -3730,6 +3731,48 @@ fn get_service_tier_ignores_configured_tier_when_fast_mode_disabled() {
     );
 }
 
+#[test]
+fn generated_thread_names_are_sanitized_for_display() {
+    assert_eq!(
+        sanitize_generated_thread_name("  Title: \"Refine Configured Session Titles!\"  "),
+        Some("Refine Configured Session Titles".to_string())
+    );
+    assert_eq!(
+        sanitize_generated_thread_name(
+            "This title is intentionally longer than the configured title maximum"
+        ),
+        Some("This title is intentionally longer…".to_string())
+    );
+    assert_eq!(sanitize_generated_thread_name("Too short"), None);
+}
+
+#[test]
+fn thread_title_instructions_include_configured_rules() {
+    let instructions = build_thread_title_instructions(Some(
+        "\nPrefer French titles and mention configuration when relevant.\n",
+    ));
+
+    assert!(instructions.contains(THREAD_TITLE_PROMPT));
+    assert!(instructions.contains(THREAD_TITLE_ADDITIONAL_INSTRUCTIONS_HEADER));
+    assert!(instructions.contains("Prefer French titles"));
+}
+
+#[test]
+fn thread_name_generation_skips_exec_and_subagents() {
+    assert!(session_source_allows_thread_name_generation(
+        &SessionSource::Cli
+    ));
+    assert!(session_source_allows_thread_name_generation(
+        &SessionSource::VSCode
+    ));
+    assert!(!session_source_allows_thread_name_generation(
+        &SessionSource::Exec
+    ));
+    assert!(!session_source_allows_thread_name_generation(
+        &SessionSource::SubAgent(SubAgentSource::Review)
+    ));
+}
+
 #[tokio::test]
 async fn session_settings_null_service_tier_update_uses_default_service_tier() {
     let session_configuration = make_session_configuration_for_tests().await;
@@ -4925,6 +4968,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
         next_internal_sub_id: AtomicU64::new(0),
+        thread_name_generation_started: AtomicBool::new(false),
     };
 
     (session, turn_context)
@@ -6989,6 +7033,7 @@ where
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
         next_internal_sub_id: AtomicU64::new(0),
+        thread_name_generation_started: AtomicBool::new(false),
     });
 
     (session, turn_context, rx_event)

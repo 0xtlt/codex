@@ -1229,6 +1229,9 @@ pub enum EventMsg {
     /// Ack the client's configure message.
     SessionConfigured(SessionConfiguredEvent),
 
+    /// User-facing thread name changed.
+    ThreadNameUpdated(ThreadNameUpdatedEvent),
+
     /// Updated long-running goal metadata for the thread.
     ThreadGoalUpdated(ThreadGoalUpdatedEvent),
 
@@ -3666,6 +3669,14 @@ pub struct ThreadGoal {
     pub time_used_seconds: i64,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "protocol/")]
+pub struct ThreadNameUpdatedEvent {
+    pub thread_id: ThreadId,
+    pub thread_name: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]

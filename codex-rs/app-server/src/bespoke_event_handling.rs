@@ -52,6 +52,7 @@ use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequestPayload;
 use codex_app_server_protocol::ThreadGoalUpdatedNotification;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadNameUpdatedNotification;
 use codex_app_server_protocol::ThreadRealtimeClosedNotification;
 use codex_app_server_protocol::ThreadRealtimeErrorNotification;
 use codex_app_server_protocol::ThreadRealtimeItemAddedNotification;
@@ -1211,6 +1212,17 @@ pub(crate) async fn apply_bespoke_event_handling(
             };
             outgoing
                 .send_global_server_notification(ServerNotification::ThreadGoalUpdated(
+                    notification,
+                ))
+                .await;
+        }
+        EventMsg::ThreadNameUpdated(thread_name_event) => {
+            let notification = ThreadNameUpdatedNotification {
+                thread_id: thread_name_event.thread_id.to_string(),
+                thread_name: Some(thread_name_event.thread_name),
+            };
+            outgoing
+                .send_global_server_notification(ServerNotification::ThreadNameUpdated(
                     notification,
                 ))
                 .await;
@@ -3293,6 +3305,68 @@ mod tests {
                 assert_eq!(n.turn.id, "turn-1");
                 assert_eq!(n.turn.items_view, TurnItemsView::NotLoaded);
                 assert!(n.turn.items.is_empty());
+            }
+            other => bail!("unexpected message: {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn thread_name_updated_event_emits_thread_name_updated_notification() -> Result<()> {
+        let codex_home = TempDir::new()?;
+        let config = load_default_config_for_test(&codex_home).await;
+        let thread_manager = Arc::new(
+            codex_core::test_support::thread_manager_with_models_provider_and_home(
+                CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+                config.model_provider.clone(),
+                config.codex_home.to_path_buf(),
+                Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+            ),
+        );
+        let codex_core::NewThread {
+            thread_id: conversation_id,
+            thread: conversation,
+            ..
+        } = thread_manager.start_thread(config.clone()).await?;
+        let thread_state = new_thread_state();
+        let thread_watch_manager = ThreadWatchManager::new();
+        let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let outgoing = Arc::new(OutgoingMessageSender::new(
+            tx,
+            codex_analytics::AnalyticsEventsClient::disabled(),
+        ));
+        let outgoing = ThreadScopedOutgoingMessageSender::new(
+            outgoing,
+            vec![ConnectionId(1)],
+            conversation_id,
+        );
+
+        apply_bespoke_event_handling(
+            Event {
+                id: String::new(),
+                msg: EventMsg::ThreadNameUpdated(
+                    codex_protocol::protocol::ThreadNameUpdatedEvent {
+                        thread_id: conversation_id,
+                        thread_name: "Generated session title".to_string(),
+                    },
+                ),
+            },
+            conversation_id,
+            conversation,
+            thread_manager,
+            outgoing,
+            thread_state,
+            thread_watch_manager,
+            Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
+            "test-provider".to_string(),
+        )
+        .await;
+
+        let msg = recv_broadcast_message(&mut rx).await?;
+        match msg {
+            OutgoingMessage::AppServerNotification(ServerNotification::ThreadNameUpdated(n)) => {
+                assert_eq!(n.thread_id, conversation_id.to_string());
+                assert_eq!(n.thread_name.as_deref(), Some("Generated session title"));
             }
             other => bail!("unexpected message: {other:?}"),
         }

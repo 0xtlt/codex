@@ -52,6 +52,8 @@ use codex_config::types::OtelConfigToml;
 use codex_config::types::OtelExporterKind;
 use codex_config::types::SandboxWorkspaceWrite;
 use codex_config::types::SessionPickerViewMode;
+use codex_config::types::SessionTitleConfig;
+use codex_config::types::SessionTitleToml;
 use codex_config::types::SkillsConfig;
 use codex_config::types::ToolSuggestDisabledTool;
 use codex_config::types::ToolSuggestDiscoverableType;
@@ -348,6 +350,39 @@ consolidation_model = "gpt-5.2"
             min_rate_limit_remaining_percent: 12,
             extract_model: Some("gpt-5-mini".to_string()),
             consolidation_model: Some("gpt-5.2".to_string()),
+        }
+    );
+
+    let session_title = r#"
+[session_title]
+enabled = false
+model = "gpt-5.4-mini"
+additional_instructions = "Prefer French titles."
+"#;
+    let session_title_cfg =
+        toml::from_str::<ConfigToml>(session_title).expect("TOML deserialization should succeed");
+    assert_eq!(
+        Some(SessionTitleToml {
+            enabled: Some(false),
+            model: Some("gpt-5.4-mini".to_string()),
+            additional_instructions: Some("Prefer French titles.".to_string()),
+        }),
+        session_title_cfg.session_title
+    );
+
+    let config = Config::load_from_base_config_with_overrides(
+        session_title_cfg,
+        ConfigOverrides::default(),
+        tempdir().expect("tempdir").abs(),
+    )
+    .await
+    .expect("load config from session title settings");
+    assert_eq!(
+        config.session_title,
+        SessionTitleConfig {
+            enabled: false,
+            model: Some("gpt-5.4-mini".to_string()),
+            additional_instructions: Some("Prefer French titles.".to_string()),
         }
     );
 

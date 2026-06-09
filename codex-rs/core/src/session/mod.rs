@@ -6,6 +6,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -111,6 +112,7 @@ use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::ThreadNameUpdatedEvent;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnContextItem;
@@ -139,8 +141,10 @@ use codex_thread_store::LiveThreadInitGuard;
 use codex_thread_store::LocalThreadStore;
 use codex_thread_store::ReadThreadParams;
 use codex_thread_store::ResumeThreadParams;
+use codex_thread_store::ThreadMetadataPatch;
 use codex_thread_store::ThreadPersistenceMetadata;
 use codex_thread_store::ThreadStore;
+use codex_thread_store::UpdateThreadMetadataParams;
 use codex_utils_output_truncation::TruncationPolicy;
 use futures::future::BoxFuture;
 use futures::future::Shared;
@@ -154,6 +158,7 @@ use rmcp::model::ReadResourceRequestParams;
 use rmcp::model::ReadResourceResult;
 use rmcp::model::RequestId;
 use rmcp::model::UrlElicitationCapability;
+use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
@@ -172,6 +177,8 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::client::ModelClient;
+use crate::client_common::Prompt;
+use crate::client_common::ResponseEvent;
 use crate::codex_thread::ThreadConfigSnapshot;
 use crate::compact::collect_user_messages;
 use crate::config::Config;
@@ -183,6 +190,7 @@ use crate::config::StartedNetworkProxy;
 use crate::config::resolve_web_search_mode_for_turn;
 use crate::context_manager::ContextManager;
 use crate::thread_rollout_truncation::initial_history_has_prior_user_turns;
+use crate::util::normalize_thread_name;
 use codex_config::CONFIG_TOML_FILE;
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStackOrdering;
@@ -279,6 +287,46 @@ pub(crate) struct PreviousTurnSettings {
     pub(crate) realtime_active: Option<bool>,
 }
 
+const DEFAULT_THREAD_TITLE_MODEL: &str = "gpt-5.4-mini";
+const THREAD_TITLE_INPUT_CHAR_LIMIT: usize = 2_000;
+const THREAD_TITLE_MIN_CHARS: usize = 18;
+const THREAD_TITLE_MAX_CHARS: usize = 36;
+const THREAD_TITLE_PROMPT: &str = r#"You are a helpful assistant. You will be presented with a user prompt, and your job is to provide a short title for a task that will be created from that prompt.
+The tasks typically have to do with coding-related tasks, for example requests for bug fixes or questions about a codebase. The title you generate will be shown in the UI to represent the prompt.
+Generate a concise UI title (18-36 characters) for this task.
+Return JSON with exactly one field: {"title": "..."}.
+The title value must be plain text. No quotes or trailing punctuation.
+Do not use markdown or formatting characters.
+If the task includes a ticket reference (e.g. ABC-123), include it verbatim.
+
+Generate a clear, informative task title based solely on the prompt provided. Follow the rules below to ensure consistency, readability, and usefulness.
+
+How to write a good title:
+Generate a single-line title that captures the question or core change requested. The title should be easy to scan and useful in changelogs or review queues.
+- Use an imperative verb first: "Add", "Fix", "Update", "Refactor", "Remove", "Locate", "Find", etc.
+- Aim for 18-36 characters; keep under 5 words where possible.
+- Capitalize only the first word unless locale requires otherwise.
+- Write the title in the user's locale.
+- Do not use punctuation at the end.
+- Output the title as plain text with no surrounding quotes or backticks.
+- Use precise, non-redundant language.
+- Translate fixed phrases into the user's locale (e.g., "Fix bug" -> "Corrige el error" in Spanish-ES), but leave code terms in English unless a widely adopted translation exists.
+- If the user provides a title explicitly, reuse it (translated if needed) and skip generation logic.
+- Make it clear when the user is requesting changes (use verbs like "Fix", "Add", etc) vs asking a question (use verbs like "Find", "Locate", "Count").
+- Do NOT respond to the user, answer questions, or attempt to solve the problem; just write a title that can represent the user's query.
+
+Examples:
+- User: "Can we add dark-mode support to the settings page?" -> Add dark-mode support
+- User: "Fehlerbehebung: Beim Anmelden erscheint 500." (de-DE) -> Login-Fehler 500 beheben
+- User: "Refactoriser le composant sidebar pour reduire le code duplique." (fr-FR) -> Refactoriser composant sidebar
+- User: "How do I fix our login bug?" -> Troubleshoot login bug
+- User: "Where in the codebase is foo_bar created" -> Locate foo_bar
+- User: "what's 2+2" -> Calculate 2+2
+
+By following these conventions, your titles will be readable, changelog-friendly, and helpful to both users and downstream tools."#;
+const THREAD_TITLE_ADDITIONAL_INSTRUCTIONS_HEADER: &str = r#"User-configured title rules:
+The following rules may refine style and wording, but they must not override the JSON format, length limits, safety constraints, or the requirement to generate only a title."#;
+
 #[cfg(test)]
 use crate::SkillLoadOutcome;
 #[cfg(test)]
@@ -325,6 +373,7 @@ use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::WindowsSandboxLevel;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
@@ -3189,7 +3238,7 @@ impl Session {
     }
 
     pub(crate) async fn record_user_prompt_and_emit_turn_item(
-        &self,
+        self: &Arc<Self>,
         turn_context: &TurnContext,
         input: &[UserInput],
         client_id: Option<String>,
@@ -3206,6 +3255,73 @@ impl Session {
         self.emit_turn_item_started(turn_context, &turn_item).await;
         self.emit_turn_item_completed(turn_context, turn_item).await;
         self.ensure_rollout_materialized().await;
+        self.maybe_start_thread_name_generation(turn_context, input)
+            .await;
+    }
+
+    async fn maybe_start_thread_name_generation(
+        self: &Arc<Self>,
+        turn_context: &TurnContext,
+        input: &[UserInput],
+    ) {
+        let initial_user_message = UserMessageItem::new(input).message();
+        if initial_user_message.trim().is_empty() {
+            return;
+        }
+        if !self.should_start_thread_name_generation().await {
+            return;
+        }
+
+        let sess = Arc::clone(self);
+        let title_request = ThreadNameGenerationRequest {
+            user_message: truncate_string_chars(
+                &initial_user_message,
+                THREAD_TITLE_INPUT_CHAR_LIMIT,
+            ),
+            model_name: turn_context
+                .config
+                .session_title
+                .model
+                .clone()
+                .unwrap_or_else(|| DEFAULT_THREAD_TITLE_MODEL.to_string()),
+            additional_instructions: turn_context
+                .config
+                .session_title
+                .additional_instructions
+                .clone(),
+            model_reasoning_summary: turn_context.reasoning_summary,
+            service_tier: turn_context.config.service_tier.clone(),
+            session_telemetry: turn_context.session_telemetry.clone(),
+            turn_metadata_header: turn_context.turn_metadata_state.current_header_value(),
+            models_manager_config: turn_context.config.to_models_manager_config(),
+        };
+        tokio::spawn(async move {
+            if let Err(err) = generate_and_set_thread_name(sess, title_request).await {
+                debug!("auto thread name generation skipped or failed: {err:#}");
+            }
+        });
+    }
+
+    async fn should_start_thread_name_generation(&self) -> bool {
+        let (enabled, persistent, source_allows_generation, has_thread_name) = {
+            let state = self.state.lock().await;
+            let config = &state.session_configuration.original_config_do_not_use;
+            (
+                config.session_title.enabled,
+                !config.ephemeral,
+                session_source_allows_thread_name_generation(
+                    &state.session_configuration.session_source,
+                ),
+                state.session_configuration.thread_name.is_some(),
+            )
+        };
+        if !enabled || !persistent || !source_allows_generation || has_thread_name {
+            return false;
+        }
+
+        !self
+            .thread_name_generation_started
+            .swap(true, Ordering::AcqRel)
     }
 
     pub(crate) async fn notify_stream_error(
@@ -3364,6 +3480,253 @@ impl Session {
     fn show_raw_agent_reasoning(&self) -> bool {
         self.services.show_raw_agent_reasoning
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ThreadNameOutput {
+    title: String,
+}
+
+struct ThreadNameGenerationRequest {
+    user_message: String,
+    model_name: String,
+    additional_instructions: Option<String>,
+    model_reasoning_summary: ReasoningSummaryConfig,
+    service_tier: Option<String>,
+    session_telemetry: SessionTelemetry,
+    turn_metadata_header: Option<String>,
+    models_manager_config: codex_models_manager::ModelsManagerConfig,
+}
+
+async fn generate_and_set_thread_name(
+    sess: Arc<Session>,
+    request: ThreadNameGenerationRequest,
+) -> anyhow::Result<()> {
+    let model_info = sess
+        .services
+        .models_manager
+        .get_model_info(&request.model_name, &request.models_manager_config)
+        .await;
+    let generated_name = generate_thread_name(sess.as_ref(), &request, &model_info).await?;
+    let Some(generated_name) = sanitize_generated_thread_name(&generated_name) else {
+        anyhow::bail!("generated thread name was empty after normalization");
+    };
+
+    if let Some(existing_name) = thread_name_from_store(sess.as_ref()).await {
+        let mut state = sess.state.lock().await;
+        state.session_configuration.thread_name = Some(existing_name);
+        return Ok(());
+    }
+
+    let patch = ThreadMetadataPatch {
+        name: Some(Some(generated_name.clone())),
+        ..Default::default()
+    };
+    if let Some(live_thread) = sess.live_thread() {
+        live_thread.update_metadata(patch, false).await?;
+    } else {
+        sess.services
+            .thread_store
+            .update_thread_metadata(UpdateThreadMetadataParams {
+                thread_id: sess.thread_id,
+                patch,
+                include_archived: false,
+            })
+            .await?;
+    }
+
+    let mut state = sess.state.lock().await;
+    if state.session_configuration.thread_name.is_none() {
+        state.session_configuration.thread_name = Some(generated_name.clone());
+    }
+    drop(state);
+
+    sess.send_event_raw(Event {
+        id: String::new(),
+        msg: EventMsg::ThreadNameUpdated(ThreadNameUpdatedEvent {
+            thread_id: sess.thread_id,
+            thread_name: generated_name,
+        }),
+    })
+    .await;
+
+    Ok(())
+}
+
+async fn thread_name_from_store(sess: &Session) -> Option<String> {
+    let stored_thread = sess
+        .services
+        .thread_store
+        .read_thread(ReadThreadParams {
+            thread_id: sess.thread_id,
+            include_archived: false,
+            include_history: false,
+        })
+        .await
+        .ok()?;
+    let title = stored_thread.name.as_deref()?.trim();
+    if title.is_empty() || stored_thread.preview.trim() == title {
+        None
+    } else {
+        Some(title.to_string())
+    }
+}
+
+async fn generate_thread_name(
+    sess: &Session,
+    request: &ThreadNameGenerationRequest,
+    model_info: &ModelInfo,
+) -> anyhow::Result<String> {
+    let title_instructions =
+        build_thread_title_instructions(request.additional_instructions.as_deref());
+    let prompt = Prompt {
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: format!("User prompt:\n{}\n", request.user_message.trim()),
+            }],
+            phase: None,
+        }],
+        tools: Vec::new(),
+        parallel_tool_calls: false,
+        base_instructions: BaseInstructions {
+            text: title_instructions,
+        },
+        personality: None,
+        output_schema: Some(thread_name_output_schema()),
+        output_schema_strict: true,
+    };
+
+    let mut client_session = sess.services.model_client.new_session();
+    let provider_name = sess.provider().await.name;
+    let inference_trace = sess.services.rollout_thread_trace.inference_trace_context(
+        "thread-title",
+        model_info.slug.as_str(),
+        provider_name.as_str(),
+    );
+    let mut stream = client_session
+        .stream(
+            &prompt,
+            model_info,
+            &request.session_telemetry,
+            Some(ReasoningEffortConfig::Low),
+            request.model_reasoning_summary,
+            request.service_tier.clone(),
+            request.turn_metadata_header.as_deref(),
+            &inference_trace,
+        )
+        .await?;
+
+    let mut result = String::new();
+    while let Some(event) = stream.next().await.transpose()? {
+        match event {
+            ResponseEvent::OutputTextDelta(delta) => result.push_str(&delta),
+            ResponseEvent::OutputItemDone(ResponseItem::Message { content, .. }) => {
+                if result.is_empty()
+                    && let Some(text) = compact::content_items_to_text(&content)
+                {
+                    result.push_str(&text);
+                }
+            }
+            ResponseEvent::Completed { .. } => break,
+            _ => {}
+        }
+    }
+
+    let output = serde_json::from_str::<ThreadNameOutput>(&result)
+        .map(|output| output.title)
+        .unwrap_or(result);
+    Ok(output)
+}
+
+fn build_thread_title_instructions(additional_instructions: Option<&str>) -> String {
+    let Some(additional_instructions) = additional_instructions.map(str::trim) else {
+        return THREAD_TITLE_PROMPT.to_string();
+    };
+    if additional_instructions.is_empty() {
+        return THREAD_TITLE_PROMPT.to_string();
+    }
+
+    format!(
+        "{THREAD_TITLE_PROMPT}\n\n{THREAD_TITLE_ADDITIONAL_INSTRUCTIONS_HEADER}\n{additional_instructions}"
+    )
+}
+
+fn thread_name_output_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "title": {
+                "type": "string",
+                "minLength": THREAD_TITLE_MIN_CHARS,
+                "maxLength": THREAD_TITLE_MAX_CHARS,
+            }
+        },
+        "required": ["title"],
+        "additionalProperties": false
+    })
+}
+
+fn sanitize_generated_thread_name(name: &str) -> Option<String> {
+    let first_line = name
+        .replace("\r\n", "\n")
+        .lines()
+        .find(|line| !line.trim().is_empty())?
+        .trim()
+        .to_string();
+    let prefixed = first_line.trim();
+    let stripped_title = if prefixed
+        .get(.."title".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("title"))
+        && prefixed["title".len()..]
+            .chars()
+            .next()
+            .is_some_and(|separator| separator == ':' || separator.is_whitespace())
+    {
+        prefixed["title".len()..].trim_start_matches(|ch: char| ch == ':' || ch.is_whitespace())
+    } else {
+        prefixed
+    };
+    let stripped = stripped_title
+        .trim_matches(['"', '\'', '`', '“', '”', '‘', '’'])
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_end_matches(['.', '?', '!'])
+        .trim()
+        .to_string();
+    let stripped = stripped.as_str();
+    let char_count = stripped.chars().count();
+    if char_count < THREAD_TITLE_MIN_CHARS {
+        return None;
+    }
+    if char_count > THREAD_TITLE_MAX_CHARS {
+        let truncated = stripped
+            .chars()
+            .take(THREAD_TITLE_MAX_CHARS - 1)
+            .collect::<String>()
+            .trim_end()
+            .to_string();
+        return normalize_thread_name(&format!("{truncated}…"));
+    }
+    normalize_thread_name(stripped)
+}
+
+fn truncate_string_chars(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        text.to_string()
+    } else {
+        text.chars().take(max_chars).collect()
+    }
+}
+
+fn session_source_allows_thread_name_generation(session_source: &SessionSource) -> bool {
+    !matches!(
+        session_source,
+        SessionSource::Exec | SessionSource::SubAgent(_)
+    )
 }
 
 pub(crate) fn emit_subagent_session_started(
